@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from app.bootstrap import apply_schema, seed_if_empty
@@ -13,11 +15,16 @@ from app.services import (
     bulk_issue,
     fetch_actor,
     get_certificate,
+    iter_certificate_csv,
     list_actors,
+    validate_certificate_query,
     list_certificates,
     list_courses,
     revoke_certificate,
 )
+from app.streaming import stream_in_one_thread
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -105,6 +112,23 @@ def certificates(
     )
 
 
+@app.get("/api/certificates/export")
+async def export_certificates(
+    actor: dict = Depends(get_actor),
+    q: str = Query(""),
+    sort: str = Query("issued_date"),
+    order: str = Query("desc"),
+):
+    validate_certificate_query(actor, q.strip(), sort, order)
+    return StreamingResponse(
+        stream_in_one_thread(
+            iter_certificate_csv(actor, q=q.strip(), sort=sort, order=order)
+        ),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="certificates.csv"'},
+    )
+
+
 @app.get("/api/certificates/{certificate_id}")
 def certificate_detail(certificate_id: str, actor: dict = Depends(get_actor)):
     return get_certificate(actor, certificate_id)
@@ -129,3 +153,7 @@ def issue_certificates(
 @app.post("/api/certificates/{certificate_id}/revoke")
 def revoke(certificate_id: str, actor: dict = Depends(get_actor)):
     return revoke_certificate(actor, certificate_id)
+
+
+if (FRONTEND_DIST / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

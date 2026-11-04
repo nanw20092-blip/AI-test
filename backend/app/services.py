@@ -1,4 +1,6 @@
+import csv
 import hashlib
+import io
 import json
 import logging
 import secrets
@@ -80,22 +82,11 @@ def _like_pattern(term: str) -> str:
     return f"%{escaped}%"
 
 
-def list_certificates(
-    actor: dict,
-    *,
-    q: str,
-    sort: str,
-    order: str,
-    page: int,
-    page_size: int,
-) -> dict:
+def _certificate_query(actor: dict, q: str, sort: str, order: str) -> tuple[str, tuple, str]:
     if sort not in SORT_COLUMNS:
         raise RequestError(400, "Invalid sort field")
     if order not in {"asc", "desc"}:
         raise RequestError(400, "Invalid sort order")
-    if page < 1 or page_size < 1 or page_size > 100:
-        raise RequestError(400, "Invalid page")
-
     pattern = _like_pattern(q)
     where = """
         WHERE c.tenant_id = %s
@@ -108,6 +99,21 @@ def list_certificates(
     params = (actor["tenant_id"], q, pattern, pattern)
     # sort and order are whitelisted above, so they are not user SQL.
     order_by = f"ORDER BY {SORT_COLUMNS[sort]} {order}, c.id ASC"
+    return where, params, order_by
+
+
+def list_certificates(
+    actor: dict,
+    *,
+    q: str,
+    sort: str,
+    order: str,
+    page: int,
+    page_size: int,
+) -> dict:
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise RequestError(400, "Invalid page")
+    where, params, order_by = _certificate_query(actor, q, sort, order)
     list_sql = f"""
         SELECT c.id, c.serial_number, co.title AS course, l.name AS learner,
                c.local_issued_at AS issued_at_local, c.issued_at, c.status
@@ -135,6 +141,57 @@ def list_certificates(
         "page_size": page_size,
         "total": total,
     }
+
+
+def validate_certificate_query(actor: dict, q: str, sort: str, order: str) -> None:
+    _certificate_query(actor, q, sort, order)
+
+
+def iter_certificate_csv(actor: dict, *, q: str, sort: str, order: str):
+    """Yield CSV text. The first yield happens after the read cursor is open."""
+    where, params, order_by = _certificate_query(actor, q, sort, order)
+    query = f"""
+        SELECT l.name AS learner_name, co.title AS course_title,
+               c.serial_number, c.local_issued_at AS issued_at_local
+        FROM certificates c
+        JOIN learners l ON l.id = c.learner_id
+        JOIN courses co ON co.id = c.course_id
+        {where}
+        {order_by}
+    """
+    header = _csv_line(
+        ["learner_name", "course_title", "serial_number", "issued_at_local"]
+    )
+    with get_pool().connection() as conn:
+        with conn.transaction():
+            cursor_name = "exp_" + uuid.uuid4().hex
+            with conn.cursor(name=cursor_name) as cur:
+                cur.itersize = 2000
+                cur.execute(query, params)
+                yield header
+                pending: list[str] = []
+                for row in cur:
+                    pending.append(
+                        _csv_line(
+                            [
+                                row["learner_name"],
+                                row["course_title"],
+                                row["serial_number"],
+                                row["issued_at_local"],
+                            ]
+                        )
+                    )
+                    if len(pending) >= 500:
+                        yield "".join(pending)
+                        pending.clear()
+                if pending:
+                    yield "".join(pending)
+
+
+def _csv_line(values: list[str]) -> str:
+    buffer = io.StringIO()
+    csv.writer(buffer, lineterminator="\n").writerow(values)
+    return buffer.getvalue()
 
 
 def get_certificate(actor: dict, certificate_id: str) -> dict:

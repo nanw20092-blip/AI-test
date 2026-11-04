@@ -36,6 +36,13 @@ def ensure_deps() -> None:
     )
 
 
+def ensure_frontend() -> None:
+    frontend = ROOT / "frontend"
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    subprocess.check_call([npm, "install"], cwd=frontend)
+    subprocess.check_call([npm, "run", "build"], cwd=frontend)
+
+
 def wait_for_postgres(dsn: str, timeout: int = 60) -> None:
     import psycopg
 
@@ -70,15 +77,16 @@ def main() -> None:
     )
     wait_for_postgres(admin_dsn(DATABASE_URL))
     prepare_database(DATABASE_URL, reset=reset)
-    print(f"Demo database is ready at {DATABASE_URL}")
-    print("Alice (East): X-Actor-Token: east-alice")
-    print("Bob (West):   X-Actor-Token: west-bob")
+    print(f"Demo database is ready at {DATABASE_URL}", flush=True)
+    print("Alice (East): X-Actor-Token: east-alice", flush=True)
+    print("Bob (West):   X-Actor-Token: west-bob", flush=True)
     if not serve:
         return
 
+    ensure_frontend()
     import uvicorn
 
-    print(f"API listening on http://{API_HOST}:{API_PORT}")
+    print(f"API listening on http://{API_HOST}:{API_PORT}", flush=True)
     uvicorn.run(
         "app.main:app",
         host=API_HOST,
